@@ -1,0 +1,9 @@
+.git
+.gitignore
+.agents
+.codex
+target
+tests
+docs/superpowers
+.superpowers
+README.md
