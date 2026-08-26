@@ -95,15 +95,15 @@ async fn records_and_changes_use_timeweb_api_contract() -> Result<(), Box<dyn st
 
     assert!(requests.iter().any(|request| {
         request.method == Method::DELETE
-            && request.path == "/api/v1/domains/mail.example.com/dns-records/2"
+            && request.path == "/api/v1/domains/example.com/dns-records/2"
     }));
     assert!(requests.iter().any(|request| {
         request.method == Method::PATCH
-            && request.path == "/api/v1/domains/www.example.com/dns-records/1"
+            && request.path == "/api/v1/domains/example.com/dns-records/1"
             && request.body.as_ref().is_some_and(|body| {
                 body == &json!({
                     "type":"A",
-                    "subdomain":"www",
+                    "subdomain":"www.example.com",
                     "value":"192.0.2.2",
                     "ttl":60
                 })
@@ -115,9 +115,79 @@ async fn records_and_changes_use_timeweb_api_contract() -> Result<(), Box<dyn st
             && request.body.as_ref().is_some_and(|body| {
                 body == &json!({
                     "type":"TXT",
-                    "subdomain":"_acme",
+                    "subdomain":"_acme.example.com",
                     "value":"token-value",
                     "ttl":60
+                })
+            })
+    }));
+
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn records_include_records_from_timeweb_subdomains() -> Result<(), Box<dyn std::error::Error>>
+{
+    let state = MockState::default();
+    let app = Router::new()
+        .route("/api/v1/domains", get(list_domains_with_subdomain))
+        .route(
+            "/api/v1/domains/{zone}/dns-records",
+            get(list_records_with_subdomain),
+        )
+        .route(
+            "/api/v1/domains/{owner}/dns-records/{id}",
+            patch(update_record).delete(delete_record),
+        )
+        .with_state(state.clone());
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let server = tokio::spawn(async move { axum::serve(listener, app).await });
+
+    let client = TimewebClient::new(
+        Url::parse(&format!("http://{address}"))?,
+        "test-token",
+        Duration::from_secs(2),
+    )?;
+    let provider = Provider::new(
+        client,
+        DomainFilter::new(Vec::new(), Vec::new(), None, None),
+    );
+
+    let records = provider.records().await?;
+    assert!(records.iter().any(|endpoint| {
+        endpoint.dns_name == "grafana.example.com"
+            && endpoint.record_type == "A"
+            && endpoint.targets == ["192.0.2.1"]
+    }));
+
+    provider
+        .apply_changes(Changes {
+            create: Vec::new(),
+            update_old: vec![endpoint("grafana.example.com", "A", "192.0.2.1", 600)],
+            update_new: vec![endpoint("grafana.example.com", "A", "192.0.2.2", 300)],
+            delete: Vec::new(),
+        })
+        .await?;
+
+    let requests = state
+        .requests
+        .lock()
+        .map_err(|_| "mock request lock was poisoned")?
+        .clone();
+    assert!(requests.iter().any(|request| {
+        request.method == Method::GET
+            && request.path == "/api/v1/domains/grafana.example.com/dns-records"
+    }));
+    assert!(requests.iter().any(|request| {
+        request.method == Method::PATCH
+            && request.path == "/api/v1/domains/grafana.example.com/dns-records/3"
+            && request.body.as_ref().is_some_and(|body| {
+                body == &json!({
+                    "type":"A",
+                    "value":"192.0.2.2",
+                    "ttl":300
                 })
             })
     }));
@@ -146,6 +216,20 @@ async fn list_domains(State(state): State<MockState>, request: axum::extract::Re
     }))
 }
 
+async fn list_domains_with_subdomain(
+    State(state): State<MockState>,
+    request: axum::extract::Request,
+) -> Response {
+    capture(&state, request).await;
+    json_response(json!({
+        "domains": [{
+            "fqdn":"example.com",
+            "subdomains":[{"fqdn":"grafana.example.com"}]
+        }],
+        "meta": {"total": 1}
+    }))
+}
+
 async fn list_records(
     State(state): State<MockState>,
     Path(zone): Path<String>,
@@ -162,6 +246,35 @@ async fn list_records(
         ],
         "meta": {"total": 2}
     }))
+}
+
+async fn list_records_with_subdomain(
+    State(state): State<MockState>,
+    Path(zone): Path<String>,
+    request: axum::extract::Request,
+) -> Response {
+    capture(&state, request).await;
+    match zone.as_str() {
+        "example.com" => json_response(json!({
+            "dns_records": [
+                {"id":1,"type":"A","data":{"value":"192.0.2.10"},"ttl":300}
+            ],
+            "meta": {"total": 1}
+        })),
+        "grafana.example.com" => json_response(json!({
+            "dns_records": [
+                {
+                    "id":3,
+                    "type":"A",
+                    "data":{"value":"192.0.2.1"},
+                    "fqdn":"grafana.example.com",
+                    "ttl":600
+                }
+            ],
+            "meta": {"total": 1}
+        })),
+        _ => StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
 async fn create_record(

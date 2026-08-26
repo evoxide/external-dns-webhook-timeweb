@@ -105,8 +105,21 @@ impl TimewebClient {
             let page_len = response.domains.len() as u64;
             for domain in response.domains {
                 let fqdn = normalize_name(&domain.fqdn);
-                if !fqdn.is_empty() {
-                    domains.insert(fqdn);
+                if fqdn.is_empty() {
+                    continue;
+                }
+                domains.insert(fqdn.clone());
+                for subdomain in domain.subdomains.unwrap_or_default() {
+                    let subdomain_fqdn = normalize_name(&subdomain.fqdn);
+                    if subdomain_fqdn.is_empty() {
+                        continue;
+                    }
+                    if subdomain_fqdn != fqdn && !subdomain_fqdn.ends_with(&format!(".{fqdn}")) {
+                        return Err(TimewebError::InvalidResponse(format!(
+                            "subdomain {subdomain_fqdn} does not belong to domain {fqdn}"
+                        )));
+                    }
+                    domains.insert(subdomain_fqdn);
                 }
             }
 
@@ -280,6 +293,12 @@ struct DomainsResponse {
 #[derive(Debug, Deserialize)]
 struct DomainResponse {
     fqdn: String,
+    subdomains: Option<Vec<SubdomainResponse>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SubdomainResponse {
+    fqdn: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -299,6 +318,7 @@ struct DnsRecordResponse {
     id: Option<u64>,
     #[serde(rename = "type")]
     record_type: String,
+    fqdn: Option<String>,
     #[serde(default)]
     data: DnsRecordData,
     ttl: Option<u64>,
@@ -318,7 +338,11 @@ impl DnsRecordResponse {
         })?;
         let record_type = self.record_type.trim().to_ascii_uppercase();
         let target = response_target(&record_type, &self.data)?;
-        let dns_name = owner_name(zone, self.data.subdomain.as_deref());
+        let dns_name = self
+            .fqdn
+            .as_deref()
+            .map(|fqdn| owner_name(zone, Some(fqdn)))
+            .unwrap_or_else(|| owner_name(zone, self.data.subdomain.as_deref()));
         let record_ttl = match self.ttl.map(i64::try_from).transpose() {
             Ok(Some(ttl)) => ttl,
             Ok(None) => 0,
@@ -545,6 +569,7 @@ mod tests {
         let response = DnsRecordResponse {
             id: Some(7),
             record_type: "SRV".to_owned(),
+            fqdn: None,
             data: DnsRecordData {
                 subdomain: Some("_sip._tcp.sub.example.com".to_owned()),
                 priority: Some(10),
@@ -556,6 +581,26 @@ mod tests {
         let record = response.into_remote_record("example.com")?;
         assert_eq!(record.endpoint.dns_name, "_sip._tcp.sub.example.com");
         assert_eq!(record.endpoint.targets, ["10 0 993 mail.example.com"]);
+        Ok(())
+    }
+
+    #[test]
+    fn restores_owner_from_subdomain_response_fqdn() -> Result<(), Box<dyn std::error::Error>> {
+        let response = DnsRecordResponse {
+            id: Some(91579517),
+            record_type: "A".to_owned(),
+            fqdn: Some("grafana.example.com".to_owned()),
+            data: DnsRecordData {
+                value: Some("192.0.2.1".to_owned()),
+                ..Default::default()
+            },
+            ttl: Some(600),
+        };
+
+        let record = response.into_remote_record("grafana.example.com")?;
+        assert_eq!(record.endpoint.dns_name, "grafana.example.com");
+        assert_eq!(record.endpoint.targets, ["192.0.2.1"]);
+        assert_eq!(record.zone, "grafana.example.com");
         Ok(())
     }
 }

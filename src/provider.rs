@@ -137,9 +137,7 @@ impl Provider {
 
         for record in records {
             if deleted_ids.insert(record.id) {
-                self.client
-                    .delete_record(&record.endpoint.dns_name, record.id)
-                    .await?;
+                self.client.delete_record(&record.zone, record.id).await?;
             }
         }
         Ok(())
@@ -219,7 +217,7 @@ impl Provider {
             if ttl_changed(&record.endpoint, new) {
                 let change = change_from_endpoint(new, &target, zone)?;
                 self.client
-                    .update_record(&record.endpoint.dns_name, record.id, &change)
+                    .update_record(&record.zone, record.id, &change)
                     .await?;
             }
         }
@@ -230,7 +228,7 @@ impl Provider {
             let target = &new_targets[index];
             let change = change_from_endpoint(new, target, zone)?;
             self.client
-                .update_record(&record.endpoint.dns_name, record.id, &change)
+                .update_record(&record.zone, record.id, &change)
                 .await?;
         }
 
@@ -244,9 +242,7 @@ impl Provider {
         if changed_count < changed.len() {
             for record in changed.iter().skip(changed_count) {
                 if deleted_ids.insert(record.id) {
-                    self.client
-                        .delete_record(&record.endpoint.dns_name, record.id)
-                        .await?;
+                    self.client.delete_record(&record.zone, record.id).await?;
                 }
             }
         }
@@ -475,14 +471,7 @@ fn change_from_endpoint(
 fn subdomain_for(dns_name: &str, zone: &str) -> Option<String> {
     let dns_name = normalize_name(dns_name);
     let zone = normalize_name(zone);
-    if dns_name == zone {
-        return None;
-    }
-    dns_name
-        .strip_suffix(&format!(".{zone}"))
-        .filter(|subdomain| !subdomain.is_empty())
-        .map(str::to_owned)
-        .or(Some(dns_name))
+    (dns_name != zone).then_some(dns_name)
 }
 
 fn parse_mx_target(target: &str) -> Result<(u16, String), ProviderError> {
@@ -648,11 +637,11 @@ mod tests {
     }
 
     #[test]
-    fn creates_relative_subdomain_payload() -> Result<(), Box<dyn std::error::Error>> {
+    fn creates_full_subdomain_payload() -> Result<(), Box<dyn std::error::Error>> {
         let endpoint = endpoint("A", "www.example.com", &["192.0.2.1"]);
         let change = change_from_endpoint(&endpoint, &endpoint.targets[0], "example.com")?;
         let json = serde_json::to_value(change)?;
-        assert_eq!(json["subdomain"], "www");
+        assert_eq!(json["subdomain"], "www.example.com");
         Ok(())
     }
 
@@ -666,7 +655,7 @@ mod tests {
         let change = change_from_endpoint(&endpoint, &endpoint.targets[0], "example.com")?;
         let json = serde_json::to_value(change)?;
         assert_eq!(json["type"], "SRV");
-        assert_eq!(json["subdomain"], "_sip._tcp");
+        assert_eq!(json["subdomain"], "_sip._tcp.example.com");
         assert_eq!(json["priority"], 10);
         assert_eq!(json["value"], "5 443 service.example.com");
         Ok(())
