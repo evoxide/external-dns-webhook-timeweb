@@ -111,9 +111,7 @@ impl Provider {
         })?;
         for target in &endpoint.targets {
             let change = change_from_endpoint(endpoint, target, zone)?;
-            self.client
-                .create_record(&endpoint.dns_name, &change)
-                .await?;
+            self.client.create_record(zone, &change).await?;
         }
         Ok(())
     }
@@ -239,7 +237,7 @@ impl Provider {
         if changed_count < new_targets.len() {
             for target in new_targets.iter().skip(changed_count) {
                 let change = change_from_endpoint(new, target, zone)?;
-                self.client.create_record(&new.dns_name, &change).await?;
+                self.client.create_record(zone, &change).await?;
             }
         }
 
@@ -390,6 +388,7 @@ fn change_from_endpoint(
     let ttl = u64::try_from(endpoint.record_ttl)
         .ok()
         .filter(|ttl| *ttl > 0);
+    let subdomain = subdomain_for(&endpoint.dns_name, zone);
     let change = match record_type.as_str() {
         "A" => {
             let address = target.parse::<IpAddr>().map_err(|_| {
@@ -404,13 +403,10 @@ fn change_from_endpoint(
             }
             DnsRecordChange {
                 record_type,
-                value: Some(target.to_owned()),
+                subdomain: subdomain.clone(),
+                value: target.to_owned(),
                 ttl,
                 priority: None,
-                service: None,
-                protocol: None,
-                port: None,
-                host: None,
             }
         }
         "AAAA" => {
@@ -426,13 +422,10 @@ fn change_from_endpoint(
             }
             DnsRecordChange {
                 record_type,
-                value: Some(target.to_owned()),
+                subdomain: subdomain.clone(),
+                value: target.to_owned(),
                 ttl,
                 priority: None,
-                service: None,
-                protocol: None,
-                port: None,
-                host: None,
             }
         }
         "TXT" | "CNAME" => {
@@ -443,45 +436,31 @@ fn change_from_endpoint(
             };
             DnsRecordChange {
                 record_type,
-                value: Some(value),
+                subdomain: subdomain.clone(),
+                value,
                 ttl,
                 priority: None,
-                service: None,
-                protocol: None,
-                port: None,
-                host: None,
             }
         }
         "MX" => {
             let (priority, host) = parse_mx_target(target)?;
             DnsRecordChange {
                 record_type,
-                value: Some(host),
+                subdomain: subdomain.clone(),
+                value: host,
                 ttl,
                 priority: Some(priority),
-                service: None,
-                protocol: None,
-                port: None,
-                host: None,
             }
         }
         "SRV" => {
             let (priority, weight, port, host) = parse_srv_target(target)?;
-            if weight != 0 {
-                return Err(ProviderError::InvalidEndpoint(
-                    "Timeweb Cloud supports only SRV records with zero weight".to_owned(),
-                ));
-            }
-            let (service, protocol) = srv_service_protocol(&endpoint.dns_name, zone)?;
+            validate_srv_owner(&endpoint.dns_name, zone)?;
             DnsRecordChange {
                 record_type,
-                value: None,
+                subdomain,
+                value: format!("{weight} {port} {host}"),
                 ttl,
                 priority: Some(priority),
-                service: Some(service),
-                protocol: Some(protocol),
-                port: Some(port),
-                host: Some(host),
             }
         }
         _ => {
@@ -491,6 +470,12 @@ fn change_from_endpoint(
         }
     };
     Ok(change)
+}
+
+fn subdomain_for(dns_name: &str, zone: &str) -> Option<String> {
+    let dns_name = normalize_name(dns_name);
+    let zone = normalize_name(zone);
+    (dns_name != zone).then_some(dns_name)
 }
 
 fn parse_mx_target(target: &str) -> Result<(u16, String), ProviderError> {
@@ -543,7 +528,7 @@ fn parse_srv_number(value: Option<&str>, target: &str, field: &str) -> Result<u1
         })
 }
 
-fn srv_service_protocol(dns_name: &str, zone: &str) -> Result<(String, String), ProviderError> {
+fn validate_srv_owner(dns_name: &str, zone: &str) -> Result<(), ProviderError> {
     let dns_name = normalize_name(dns_name);
     let zone = normalize_name(zone);
     let relative = match dns_name.strip_suffix(&format!(".{zone}")) {
@@ -559,7 +544,7 @@ fn srv_service_protocol(dns_name: &str, zone: &str) -> Result<(String, String), 
             "SRV DNS name must start with service and protocol labels: {dns_name}"
         )));
     }
-    Ok((service.to_owned(), protocol.to_owned()))
+    Ok(())
 }
 
 fn canonical_target(record_type: &str, target: &str) -> String {
@@ -590,8 +575,7 @@ fn normalize_name(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        ProviderError, canonical_target, change_from_endpoint, group_records, parse_mx_target,
-        parse_srv_target,
+        canonical_target, change_from_endpoint, group_records, parse_mx_target, parse_srv_target,
     };
     use crate::{model::Endpoint, timeweb::RemoteRecord};
 
@@ -652,17 +636,23 @@ mod tests {
         assert_eq!(json["type"], "MX");
         assert_eq!(json["priority"], 10);
         assert_eq!(json["value"], "mail.example.com");
+        assert!(json.get("subdomain").is_none());
         Ok(())
     }
 
     #[test]
-    fn rejects_non_zero_srv_weight() {
+    fn creates_timeweb_srv_payload() -> Result<(), Box<dyn std::error::Error>> {
         let endpoint = endpoint(
             "SRV",
             "_sip._tcp.example.com",
             &["10 5 443 service.example.com"],
         );
-        let error = change_from_endpoint(&endpoint, &endpoint.targets[0], "example.com");
-        assert!(matches!(error, Err(ProviderError::InvalidEndpoint(_))));
+        let change = change_from_endpoint(&endpoint, &endpoint.targets[0], "example.com")?;
+        let json = serde_json::to_value(change)?;
+        assert_eq!(json["type"], "SRV");
+        assert_eq!(json["subdomain"], "_sip._tcp.example.com");
+        assert_eq!(json["priority"], 10);
+        assert_eq!(json["value"], "5 443 service.example.com");
+        Ok(())
     }
 }

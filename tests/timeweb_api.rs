@@ -4,7 +4,7 @@ use axum::{
     extract::{Path, State},
     http::{Method, StatusCode},
     response::{IntoResponse, Response},
-    routing::{get, patch, post},
+    routing::{get, patch},
 };
 use external_dns_webhook_timeweb::{
     domain_filter::DomainFilter,
@@ -38,10 +38,12 @@ async fn records_and_changes_use_timeweb_api_contract() -> Result<(), Box<dyn st
     let state = MockState::default();
     let app = Router::new()
         .route("/api/v1/domains", get(list_domains))
-        .route("/api/v1/domains/{zone}/dns-records", get(list_records))
-        .route("/api/v2/domains/{owner}/dns-records", post(create_record))
         .route(
-            "/api/v2/domains/{owner}/dns-records/{id}",
+            "/api/v1/domains/{zone}/dns-records",
+            get(list_records).post(create_record),
+        )
+        .route(
+            "/api/v1/domains/{owner}/dns-records/{id}",
             patch(update_record).delete(delete_record),
         )
         .with_state(state.clone());
@@ -93,23 +95,31 @@ async fn records_and_changes_use_timeweb_api_contract() -> Result<(), Box<dyn st
 
     assert!(requests.iter().any(|request| {
         request.method == Method::DELETE
-            && request.path == "/api/v2/domains/mail.example.com/dns-records/2"
+            && request.path == "/api/v1/domains/mail.example.com/dns-records/2"
     }));
     assert!(requests.iter().any(|request| {
         request.method == Method::PATCH
-            && request.path == "/api/v2/domains/www.example.com/dns-records/1"
-            && request
-                .body
-                .as_ref()
-                .is_some_and(|body| body == &json!({"type":"A","value":"192.0.2.2","ttl":60}))
+            && request.path == "/api/v1/domains/www.example.com/dns-records/1"
+            && request.body.as_ref().is_some_and(|body| {
+                body == &json!({
+                    "type":"A",
+                    "subdomain":"www.example.com",
+                    "value":"192.0.2.2",
+                    "ttl":60
+                })
+            })
     }));
     assert!(requests.iter().any(|request| {
         request.method == Method::POST
-            && request.path == "/api/v2/domains/_acme.example.com/dns-records"
-            && request
-                .body
-                .as_ref()
-                .is_some_and(|body| body == &json!({"type":"TXT","value":"token-value","ttl":60}))
+            && request.path == "/api/v1/domains/example.com/dns-records"
+            && request.body.as_ref().is_some_and(|body| {
+                body == &json!({
+                    "type":"TXT",
+                    "subdomain":"_acme.example.com",
+                    "value":"token-value",
+                    "ttl":60
+                })
+            })
     }));
 
     server.abort();

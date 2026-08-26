@@ -59,19 +59,12 @@ pub struct DnsRecordChange {
     #[serde(rename = "type")]
     pub record_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub value: Option<String>,
+    pub subdomain: Option<String>,
+    pub value: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ttl: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub priority: Option<u16>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub service: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub protocol: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub port: Option<u16>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub host: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -270,8 +263,8 @@ impl TimewebClient {
             )));
         }
         let path = match record_id {
-            Some(id) => format!("/api/v2/domains/{owner_fqdn}/dns-records/{id}"),
-            None => format!("/api/v2/domains/{owner_fqdn}/dns-records"),
+            Some(id) => format!("/api/v1/domains/{owner_fqdn}/dns-records/{id}"),
+            None => format!("/api/v1/domains/{owner_fqdn}/dns-records"),
         };
         self.api_url(&path)
     }
@@ -316,11 +309,6 @@ struct DnsRecordData {
     priority: Option<u16>,
     subdomain: Option<String>,
     value: Option<String>,
-    host: Option<String>,
-    port: Option<u16>,
-    service: Option<String>,
-    protocol: Option<String>,
-    weight: Option<u16>,
 }
 
 impl DnsRecordResponse {
@@ -330,15 +318,7 @@ impl DnsRecordResponse {
         })?;
         let record_type = self.record_type.trim().to_ascii_uppercase();
         let target = response_target(&record_type, &self.data)?;
-        let dns_name = match record_type.as_str() {
-            "SRV" => srv_owner_name(
-                zone,
-                self.data.subdomain.as_deref(),
-                self.data.service.as_deref(),
-                self.data.protocol.as_deref(),
-            )?,
-            _ => owner_name(zone, self.data.subdomain.as_deref()),
-        };
+        let dns_name = owner_name(zone, self.data.subdomain.as_deref());
         let record_ttl = match self.ttl.map(i64::try_from).transpose() {
             Ok(Some(ttl)) => ttl,
             Ok(None) => 0,
@@ -389,36 +369,45 @@ fn response_target(record_type: &str, data: &DnsRecordData) -> Result<String, Ti
             let priority = data
                 .priority
                 .ok_or_else(|| missing_record_field(record_type, "priority"))?;
-            let service = data
-                .service
+            let value = data
+                .value
                 .as_deref()
-                .ok_or_else(|| missing_record_field(record_type, "service"))?;
-            let protocol = data
-                .protocol
-                .as_deref()
-                .ok_or_else(|| missing_record_field(record_type, "protocol"))?;
-            if !service.starts_with('_') || !protocol.starts_with('_') {
-                return Err(TimewebError::InvalidResponse(
-                    "SRV service and protocol must start with underscores".to_owned(),
-                ));
-            }
-            let port = data
-                .port
-                .ok_or_else(|| missing_record_field(record_type, "port"))?;
-            let host = data
-                .host
-                .as_deref()
-                .ok_or_else(|| missing_record_field(record_type, "host"))?;
-            let weight = data.weight.unwrap_or(0);
+                .ok_or_else(|| missing_record_field(record_type, "value"))?;
+            let (weight, port, host) = parse_srv_value(value)?;
             Ok(format!(
                 "{priority} {weight} {port} {}",
-                normalize_target(record_type, host)
+                normalize_target(record_type, &host)
             ))
         }
         other => Err(TimewebError::InvalidResponse(format!(
             "unsupported DNS record type {other}"
         ))),
     }
+}
+
+fn parse_srv_value(value: &str) -> Result<(u16, u16, String), TimewebError> {
+    let mut parts = value.split_whitespace();
+    let weight = parts
+        .next()
+        .ok_or_else(|| missing_record_field("SRV", "weight"))?
+        .parse::<u16>()
+        .map_err(|_| {
+            TimewebError::InvalidResponse("SRV DNS record has invalid weight".to_owned())
+        })?;
+    let port = parts
+        .next()
+        .ok_or_else(|| missing_record_field("SRV", "port"))?
+        .parse::<u16>()
+        .map_err(|_| TimewebError::InvalidResponse("SRV DNS record has invalid port".to_owned()))?;
+    let host = parts
+        .next()
+        .ok_or_else(|| missing_record_field("SRV", "host"))?;
+    if parts.next().is_some() {
+        return Err(TimewebError::InvalidResponse(
+            "SRV DNS record value has extra fields".to_owned(),
+        ));
+    }
+    Ok((weight, port, host.trim_end_matches('.').to_owned()))
 }
 
 fn missing_record_field(record_type: &str, field: &str) -> TimewebError {
@@ -439,31 +428,6 @@ fn owner_name(zone: &str, subdomain: Option<&str>) -> String {
     } else {
         format!("{subdomain}.{zone}")
     }
-}
-
-fn srv_owner_name(
-    zone: &str,
-    subdomain: Option<&str>,
-    service: Option<&str>,
-    protocol: Option<&str>,
-) -> Result<String, TimewebError> {
-    let service = normalize_srv_label(service, "service")?;
-    let protocol = normalize_srv_label(protocol, "protocol")?;
-    let owner = owner_name(zone, subdomain);
-    let prefix = format!("{service}.{protocol}");
-    if owner == prefix || owner.starts_with(&format!("{prefix}.")) {
-        Ok(owner)
-    } else {
-        Ok(format!("{prefix}.{owner}"))
-    }
-}
-
-fn normalize_srv_label(value: Option<&str>, field: &str) -> Result<String, TimewebError> {
-    let value = value
-        .map(normalize_name)
-        .filter(|value| value.starts_with('_') && value.len() > 1 && !value.contains('.'))
-        .ok_or_else(|| missing_record_field("SRV", field))?;
-    Ok(value)
 }
 
 fn normalize_name(value: &str) -> String {
@@ -577,18 +541,14 @@ mod tests {
     }
 
     #[test]
-    fn restores_srv_service_and_protocol_in_owner_name() -> Result<(), Box<dyn std::error::Error>> {
+    fn restores_srv_owner_name_from_v1_response() -> Result<(), Box<dyn std::error::Error>> {
         let response = DnsRecordResponse {
             id: Some(7),
             record_type: "SRV".to_owned(),
             data: DnsRecordData {
-                subdomain: Some("sub".to_owned()),
-                service: Some("_sip".to_owned()),
-                protocol: Some("_TCP".to_owned()),
+                subdomain: Some("_sip._tcp.sub.example.com".to_owned()),
                 priority: Some(10),
-                port: Some(993),
-                host: Some("mail.example.com.".to_owned()),
-                ..Default::default()
+                value: Some("0 993 mail.example.com.".to_owned()),
             },
             ttl: Some(300),
         };
