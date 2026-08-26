@@ -103,7 +103,7 @@ async fn records_and_changes_use_timeweb_api_contract() -> Result<(), Box<dyn st
             && request.body.as_ref().is_some_and(|body| {
                 body == &json!({
                     "type":"A",
-                    "subdomain":"www.example.com",
+                    "subdomain":"www",
                     "value":"192.0.2.2",
                     "ttl":60
                 })
@@ -115,7 +115,7 @@ async fn records_and_changes_use_timeweb_api_contract() -> Result<(), Box<dyn st
             && request.body.as_ref().is_some_and(|body| {
                 body == &json!({
                     "type":"TXT",
-                    "subdomain":"_acme.example.com",
+                    "subdomain":"_acme",
                     "value":"token-value",
                     "ttl":60
                 })
