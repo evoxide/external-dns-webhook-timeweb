@@ -108,13 +108,12 @@ impl Provider {
         endpoint: &Endpoint,
         state: &RemoteState,
     ) -> Result<(), ProviderError> {
-        let zone = find_record_zone(&state.zones, &endpoint.dns_name, &endpoint.record_type)
-            .ok_or_else(|| {
-                ProviderError::InvalidEndpoint(format!(
-                    "no Timeweb Cloud domain contains {}",
-                    endpoint.dns_name
-                ))
-            })?;
+        let zone = find_record_zone(&state.zones, &endpoint.dns_name).ok_or_else(|| {
+            ProviderError::InvalidEndpoint(format!(
+                "no Timeweb Cloud domain contains {}",
+                endpoint.dns_name
+            ))
+        })?;
         for target in &endpoint.targets {
             if state.records.iter().any(|record| {
                 same_record_identity(&record.endpoint, endpoint)
@@ -171,13 +170,12 @@ impl Provider {
                     .to_owned(),
             ));
         }
-        let zone =
-            find_record_zone(&state.zones, &old.dns_name, &old.record_type).ok_or_else(|| {
-                ProviderError::InvalidEndpoint(format!(
-                    "no Timeweb Cloud domain contains {}",
-                    old.dns_name
-                ))
-            })?;
+        let zone = find_record_zone(&state.zones, &old.dns_name).ok_or_else(|| {
+            ProviderError::InvalidEndpoint(format!(
+                "no Timeweb Cloud domain contains {}",
+                old.dns_name
+            ))
+        })?;
 
         let mut old_records = Vec::new();
         let mut used_ids = HashSet::new();
@@ -443,24 +441,8 @@ fn find_zone<'a>(zones: &'a [String], dns_name: &str) -> Option<&'a str> {
         .map(String::as_str)
 }
 
-fn find_record_zone<'a>(zones: &'a [String], dns_name: &str, record_type: &str) -> Option<&'a str> {
-    if record_type.eq_ignore_ascii_case("TXT") {
-        find_base_zone(zones, dns_name)
-    } else {
-        find_zone(zones, dns_name)
-    }
-}
-
-fn find_base_zone<'a>(zones: &'a [String], dns_name: &str) -> Option<&'a str> {
-    let dns_name = normalize_name(dns_name);
-    zones
-        .iter()
-        .filter(|zone| {
-            let zone = normalize_name(zone);
-            dns_name == zone || dns_name.ends_with(&format!(".{zone}"))
-        })
-        .min_by_key(|zone| zone.len())
-        .map(String::as_str)
+fn find_record_zone<'a>(zones: &'a [String], dns_name: &str) -> Option<&'a str> {
+    find_zone(zones, dns_name)
 }
 
 fn change_from_endpoint(
@@ -742,15 +724,15 @@ mod tests {
     }
 
     #[test]
-    fn selects_the_base_domain_for_txt_records() {
+    fn selects_the_most_specific_domain_for_records() {
         let zones = vec!["evoxide.ru".to_owned(), "grafana.evoxide.ru".to_owned()];
         assert_eq!(
-            find_record_zone(&zones, "grafana.evoxide.ru", "TXT"),
-            Some("evoxide.ru")
+            find_record_zone(&zones, "grafana.evoxide.ru"),
+            Some("grafana.evoxide.ru")
         );
         assert_eq!(
-            find_record_zone(&zones, "grafana.evoxide.ru", "A"),
-            Some("grafana.evoxide.ru")
+            find_record_zone(&zones, "api.evoxide.ru"),
+            Some("evoxide.ru")
         );
     }
 

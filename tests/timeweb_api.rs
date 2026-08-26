@@ -269,19 +269,14 @@ async fn discovers_unlisted_scopes_from_changes() -> Result<(), Box<dyn std::err
     }));
     assert!(requests.iter().any(|request| {
         request.method == Method::POST
-            && request.path == "/api/v1/domains/example.com/dns-records"
+            && request.path == "/api/v1/domains/grafana.example.com/dns-records"
             && request.body.as_ref().is_some_and(|body| {
                 body == &json!({
                     "type":"TXT",
-                    "subdomain":"grafana",
                     "value":"ownership",
                     "ttl":300
                 })
             })
-    }));
-    assert!(!requests.iter().any(|request| {
-        request.method == Method::POST
-            && request.path == "/api/v1/domains/grafana.example.com/dns-records"
     }));
 
     server.abort();
