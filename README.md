@@ -18,13 +18,13 @@ Use ExternalDNS with domains managed by Timeweb Cloud. The provider supports A, 
 Build and run the provider:
 
 ```bash
-docker build --pull --tag docker.io/library/external-dns-webhook-timeweb:0.6.0 .
+docker build --pull --tag docker.io/library/external-dns-webhook-timeweb:0.7.0 .
 docker run --rm \
   --name timeweb-webhook \
   --env TIMEWEB_CLOUD_TOKEN='your-timeweb-api-token' \
   --publish 127.0.0.1:8888:8888 \
   --publish 127.0.0.1:8080:8080 \
-  docker.io/library/external-dns-webhook-timeweb:0.6.0
+  docker.io/library/external-dns-webhook-timeweb:0.7.0
 ```
 
 Configure ExternalDNS to use the running provider:
@@ -68,8 +68,8 @@ cargo run --release
 Create a tag matching `v*.*.*` and push it to GitHub:
 
 ```bash
-git tag v0.6.0
-git push origin v0.6.0
+git tag v0.7.0
+git push origin v0.7.0
 ```
 
 ## License
