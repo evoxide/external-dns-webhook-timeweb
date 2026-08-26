@@ -409,7 +409,7 @@ fn response_target(record_type: &str, data: &DnsRecordData) -> Result<String, Ti
                 .host
                 .as_deref()
                 .ok_or_else(|| missing_record_field(record_type, "host"))?;
-            let weight = data.weight.map_or(0, |weight| weight);
+            let weight = data.weight.unwrap_or(0);
             Ok(format!(
                 "{priority} {weight} {port} {}",
                 normalize_target(record_type, host)
