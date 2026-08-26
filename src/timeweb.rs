@@ -505,20 +505,17 @@ async fn read_body(response: Response) -> Result<Vec<u8>, TimewebError> {
 }
 
 fn api_status_error(status: StatusCode, body: &[u8]) -> TimewebError {
-    let message = match serde_json::from_slice::<ApiErrorResponse>(body)
+    let message = serde_json::from_slice::<ApiErrorResponse>(body)
         .ok()
-        .and_then(|error| error.message)
-    {
-        Some(message) if !message.to_string().is_empty() => message.to_string(),
-        Some(_) | None => {
+        .and_then(format_api_error)
+        .unwrap_or_else(|| {
             let text = String::from_utf8_lossy(body).trim().to_owned();
             if text.is_empty() {
                 "empty response body".to_owned()
             } else {
                 truncate_message(&text)
             }
-        }
-    };
+        });
     TimewebError::HttpStatus {
         status: status.as_u16(),
         message,
@@ -528,6 +525,28 @@ fn api_status_error(status: StatusCode, body: &[u8]) -> TimewebError {
 #[derive(Debug, Deserialize)]
 struct ApiErrorResponse {
     message: Option<ApiErrorMessage>,
+    code: Option<String>,
+    response_id: Option<String>,
+}
+
+fn format_api_error(error: ApiErrorResponse) -> Option<String> {
+    let mut details = Vec::new();
+    if let Some(message) = error.message {
+        let message = message.to_string();
+        if !message.is_empty() {
+            details.push(message);
+        }
+    }
+    if let Some(code) = error.code.filter(|code| !code.trim().is_empty()) {
+        details.push(format!("code={code}"));
+    }
+    if let Some(response_id) = error
+        .response_id
+        .filter(|response_id| !response_id.trim().is_empty())
+    {
+        details.push(format!("response_id={response_id}"));
+    }
+    (!details.is_empty()).then(|| truncate_message(&details.join("; ")))
 }
 
 #[derive(Debug, Deserialize)]

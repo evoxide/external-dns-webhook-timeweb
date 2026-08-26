@@ -108,12 +108,13 @@ impl Provider {
         endpoint: &Endpoint,
         state: &RemoteState,
     ) -> Result<(), ProviderError> {
-        let zone = find_zone(&state.zones, &endpoint.dns_name).ok_or_else(|| {
-            ProviderError::InvalidEndpoint(format!(
-                "no Timeweb Cloud domain contains {}",
-                endpoint.dns_name
-            ))
-        })?;
+        let zone = find_record_zone(&state.zones, &endpoint.dns_name, &endpoint.record_type)
+            .ok_or_else(|| {
+                ProviderError::InvalidEndpoint(format!(
+                    "no Timeweb Cloud domain contains {}",
+                    endpoint.dns_name
+                ))
+            })?;
         for target in &endpoint.targets {
             if state.records.iter().any(|record| {
                 same_record_identity(&record.endpoint, endpoint)
@@ -170,12 +171,13 @@ impl Provider {
                     .to_owned(),
             ));
         }
-        let zone = find_zone(&state.zones, &old.dns_name).ok_or_else(|| {
-            ProviderError::InvalidEndpoint(format!(
-                "no Timeweb Cloud domain contains {}",
-                old.dns_name
-            ))
-        })?;
+        let zone =
+            find_record_zone(&state.zones, &old.dns_name, &old.record_type).ok_or_else(|| {
+                ProviderError::InvalidEndpoint(format!(
+                    "no Timeweb Cloud domain contains {}",
+                    old.dns_name
+                ))
+            })?;
 
         let mut old_records = Vec::new();
         let mut used_ids = HashSet::new();
@@ -441,6 +443,26 @@ fn find_zone<'a>(zones: &'a [String], dns_name: &str) -> Option<&'a str> {
         .map(String::as_str)
 }
 
+fn find_record_zone<'a>(zones: &'a [String], dns_name: &str, record_type: &str) -> Option<&'a str> {
+    if record_type.eq_ignore_ascii_case("TXT") {
+        find_base_zone(zones, dns_name)
+    } else {
+        find_zone(zones, dns_name)
+    }
+}
+
+fn find_base_zone<'a>(zones: &'a [String], dns_name: &str) -> Option<&'a str> {
+    let dns_name = normalize_name(dns_name);
+    zones
+        .iter()
+        .filter(|zone| {
+            let zone = normalize_name(zone);
+            dns_name == zone || dns_name.ends_with(&format!(".{zone}"))
+        })
+        .min_by_key(|zone| zone.len())
+        .map(String::as_str)
+}
+
 fn change_from_endpoint(
     endpoint: &Endpoint,
     target: &str,
@@ -537,7 +559,14 @@ fn change_from_endpoint(
 fn subdomain_for(dns_name: &str, zone: &str) -> Option<String> {
     let dns_name = normalize_name(dns_name);
     let zone = normalize_name(zone);
-    (dns_name != zone).then_some(dns_name)
+    if dns_name == zone {
+        return None;
+    }
+    dns_name
+        .strip_suffix(&format!(".{zone}"))
+        .filter(|subdomain| !subdomain.is_empty())
+        .map(str::to_owned)
+        .or(Some(dns_name))
 }
 
 fn parse_mx_target(target: &str) -> Result<(u16, String), ProviderError> {
@@ -637,7 +666,8 @@ fn normalize_name(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        canonical_target, change_from_endpoint, group_records, parse_mx_target, parse_srv_target,
+        canonical_target, change_from_endpoint, find_record_zone, group_records, parse_mx_target,
+        parse_srv_target,
     };
     use crate::{model::Endpoint, timeweb::RemoteRecord};
 
@@ -703,12 +733,25 @@ mod tests {
     }
 
     #[test]
-    fn creates_full_subdomain_payload() -> Result<(), Box<dyn std::error::Error>> {
+    fn creates_relative_subdomain_payload() -> Result<(), Box<dyn std::error::Error>> {
         let endpoint = endpoint("A", "www.example.com", &["192.0.2.1"]);
         let change = change_from_endpoint(&endpoint, &endpoint.targets[0], "example.com")?;
         let json = serde_json::to_value(change)?;
-        assert_eq!(json["subdomain"], "www.example.com");
+        assert_eq!(json["subdomain"], "www");
         Ok(())
+    }
+
+    #[test]
+    fn selects_the_base_domain_for_txt_records() {
+        let zones = vec!["evoxide.ru".to_owned(), "grafana.evoxide.ru".to_owned()];
+        assert_eq!(
+            find_record_zone(&zones, "grafana.evoxide.ru", "TXT"),
+            Some("evoxide.ru")
+        );
+        assert_eq!(
+            find_record_zone(&zones, "grafana.evoxide.ru", "A"),
+            Some("grafana.evoxide.ru")
+        );
     }
 
     #[test]
@@ -721,7 +764,7 @@ mod tests {
         let change = change_from_endpoint(&endpoint, &endpoint.targets[0], "example.com")?;
         let json = serde_json::to_value(change)?;
         assert_eq!(json["type"], "SRV");
-        assert_eq!(json["subdomain"], "_sip._tcp.example.com");
+        assert_eq!(json["subdomain"], "_sip._tcp");
         assert_eq!(json["priority"], 10);
         assert_eq!(json["value"], "5 443 service.example.com");
         Ok(())

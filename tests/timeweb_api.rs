@@ -103,7 +103,7 @@ async fn records_and_changes_use_timeweb_api_contract() -> Result<(), Box<dyn st
             && request.body.as_ref().is_some_and(|body| {
                 body == &json!({
                     "type":"A",
-                    "subdomain":"www.example.com",
+                    "subdomain":"www",
                     "value":"192.0.2.2",
                     "ttl":60
                 })
@@ -115,7 +115,7 @@ async fn records_and_changes_use_timeweb_api_contract() -> Result<(), Box<dyn st
             && request.body.as_ref().is_some_and(|body| {
                 body == &json!({
                     "type":"TXT",
-                    "subdomain":"_acme.example.com",
+                    "subdomain":"_acme",
                     "value":"token-value",
                     "ttl":60
                 })
@@ -231,6 +231,7 @@ async fn discovers_unlisted_scopes_from_changes() -> Result<(), Box<dyn std::err
         .apply_changes(Changes {
             create: vec![
                 endpoint("grafana.example.com", "A", "192.0.2.1", 600),
+                endpoint("grafana.example.com", "TXT", "ownership", 300),
                 endpoint("api.example.com", "A", "192.0.2.2", 300),
             ],
             update_old: Vec::new(),
@@ -262,6 +263,18 @@ async fn discovers_unlisted_scopes_from_changes() -> Result<(), Box<dyn std::err
                 body == &json!({
                     "type":"A",
                     "value":"192.0.2.2",
+                    "ttl":300
+                })
+            })
+    }));
+    assert!(requests.iter().any(|request| {
+        request.method == Method::POST
+            && request.path == "/api/v1/domains/example.com/dns-records"
+            && request.body.as_ref().is_some_and(|body| {
+                body == &json!({
+                    "type":"TXT",
+                    "subdomain":"grafana",
+                    "value":"ownership",
                     "ttl":300
                 })
             })
