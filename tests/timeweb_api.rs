@@ -196,6 +196,85 @@ async fn records_include_records_from_timeweb_subdomains() -> Result<(), Box<dyn
     Ok(())
 }
 
+#[tokio::test]
+async fn discovers_unlisted_scopes_from_changes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = MockState::default();
+    let app = Router::new()
+        .route("/api/v1/domains", get(list_domains))
+        .route(
+            "/api/v1/domains/{zone}/dns-records",
+            get(list_records_with_unlisted_scopes).post(create_record),
+        )
+        .route(
+            "/api/v1/domains/{owner}/dns-records/{id}",
+            patch(update_record).delete(delete_record),
+        )
+        .with_state(state.clone());
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let server = tokio::spawn(async move { axum::serve(listener, app).await });
+
+    let client = TimewebClient::new(
+        Url::parse(&format!("http://{address}"))?,
+        "test-token",
+        Duration::from_secs(2),
+    )?;
+    let provider = Provider::new(
+        client,
+        DomainFilter::new(Vec::new(), Vec::new(), None, None),
+    );
+
+    let initial_records = provider.records().await?;
+    assert!(initial_records.is_empty());
+
+    provider
+        .apply_changes(Changes {
+            create: vec![
+                endpoint("grafana.example.com", "A", "192.0.2.1", 600),
+                endpoint("api.example.com", "A", "192.0.2.2", 300),
+            ],
+            update_old: Vec::new(),
+            update_new: Vec::new(),
+            delete: Vec::new(),
+        })
+        .await?;
+
+    let records = provider.records().await?;
+    assert!(records.iter().any(|endpoint| {
+        endpoint.dns_name == "grafana.example.com"
+            && endpoint.record_type == "A"
+            && endpoint.targets == ["192.0.2.1"]
+    }));
+
+    let requests = state
+        .requests
+        .lock()
+        .map_err(|_| "mock request lock was poisoned")?
+        .clone();
+    assert!(requests.iter().any(|request| {
+        request.method == Method::GET
+            && request.path == "/api/v1/domains/grafana.example.com/dns-records"
+    }));
+    assert!(requests.iter().any(|request| {
+        request.method == Method::POST
+            && request.path == "/api/v1/domains/api.example.com/dns-records"
+            && request.body.as_ref().is_some_and(|body| {
+                body == &json!({
+                    "type":"A",
+                    "value":"192.0.2.2",
+                    "ttl":300
+                })
+            })
+    }));
+    assert!(!requests.iter().any(|request| {
+        request.method == Method::POST
+            && request.path == "/api/v1/domains/grafana.example.com/dns-records"
+    }));
+
+    server.abort();
+    Ok(())
+}
+
 fn endpoint(dns_name: &str, record_type: &str, target: &str, ttl: i64) -> Endpoint {
     Endpoint {
         dns_name: dns_name.to_owned(),
@@ -260,6 +339,33 @@ async fn list_records_with_subdomain(
                 {"id":1,"type":"A","data":{"value":"192.0.2.10"},"ttl":300}
             ],
             "meta": {"total": 1}
+        })),
+        "grafana.example.com" => json_response(json!({
+            "dns_records": [
+                {
+                    "id":3,
+                    "type":"A",
+                    "data":{"value":"192.0.2.1"},
+                    "fqdn":"grafana.example.com",
+                    "ttl":600
+                }
+            ],
+            "meta": {"total": 1}
+        })),
+        _ => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn list_records_with_unlisted_scopes(
+    State(state): State<MockState>,
+    Path(zone): Path<String>,
+    request: axum::extract::Request,
+) -> Response {
+    capture(&state, request).await;
+    match zone.as_str() {
+        "example.com" | "api.example.com" => json_response(json!({
+            "dns_records": [],
+            "meta": {"total": 0}
         })),
         "grafana.example.com" => json_response(json!({
             "dns_records": [

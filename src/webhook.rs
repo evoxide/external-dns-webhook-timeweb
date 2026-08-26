@@ -101,6 +101,7 @@ async fn apply_changes(
         Ok(()) => Ok(StatusCode::NO_CONTENT),
         Err(error) => {
             state.metrics.inc_changes_errors();
+            tracing::error!(error = %error, "failed to apply DNS changes");
             Err(WebhookError::from_provider(error))
         }
     }

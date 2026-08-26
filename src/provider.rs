@@ -4,10 +4,12 @@ use crate::{
     timeweb::{DnsRecordChange, RemoteRecord, TimewebClient, TimewebError},
 };
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     net::IpAddr,
+    sync::Arc,
 };
 use thiserror::Error;
+use tokio::sync::RwLock;
 
 const SUPPORTED_RECORD_TYPES: &[&str] = &["A", "AAAA", "TXT", "CNAME", "MX", "SRV"];
 
@@ -44,6 +46,7 @@ impl ProviderError {
 pub struct Provider {
     client: TimewebClient,
     domain_filter: DomainFilter,
+    discovered_zones: Arc<RwLock<BTreeSet<String>>>,
 }
 
 struct RemoteState {
@@ -56,6 +59,7 @@ impl Provider {
         Self {
             client,
             domain_filter,
+            discovered_zones: Arc::new(RwLock::new(BTreeSet::new())),
         }
     }
 
@@ -78,7 +82,8 @@ impl Provider {
             return Ok(());
         }
 
-        let state = self.load_state().await?;
+        let mut state = self.load_state().await?;
+        self.discover_change_zones(&changes, &mut state).await?;
         let mut deleted_ids = HashSet::new();
 
         for endpoint in &changes.delete {
@@ -110,6 +115,15 @@ impl Provider {
             ))
         })?;
         for target in &endpoint.targets {
+            if state.records.iter().any(|record| {
+                same_record_identity(&record.endpoint, endpoint)
+                    && record.endpoint.targets.first().is_some_and(|current| {
+                        canonical_target(&endpoint.record_type, current)
+                            == canonical_target(&endpoint.record_type, target)
+                    })
+            }) {
+                continue;
+            }
             let change = change_from_endpoint(endpoint, target, zone)?;
             self.client.create_record(zone, &change).await?;
         }
@@ -251,21 +265,73 @@ impl Provider {
     }
 
     async fn load_state(&self) -> Result<RemoteState, ProviderError> {
-        let domains = self.client.list_domains().await?;
+        let mut domain_names = self
+            .client
+            .list_domains()
+            .await?
+            .into_iter()
+            .map(|domain| domain.fqdn)
+            .collect::<BTreeSet<_>>();
+        domain_names.extend(self.discovered_zones.read().await.iter().cloned());
+
         let mut zones = Vec::new();
         let mut records = Vec::new();
-        for domain in domains {
-            if !self.domain_filter.zone_may_contain(&domain.fqdn) {
+        for domain_name in domain_names {
+            if !self.domain_filter.zone_may_contain(&domain_name) {
                 continue;
             }
-            zones.push(domain.fqdn.clone());
-            for record in self.client.list_zone_records(&domain.fqdn).await? {
+            zones.push(domain_name.clone());
+            for record in self.client.list_zone_records(&domain_name).await? {
                 if self.domain_filter.matches(&record.endpoint.dns_name) {
                     records.push(record);
                 }
             }
         }
         Ok(RemoteState { zones, records })
+    }
+
+    async fn discover_change_zones(
+        &self,
+        changes: &Changes,
+        state: &mut RemoteState,
+    ) -> Result<(), ProviderError> {
+        let endpoints = changes
+            .create
+            .iter()
+            .chain(&changes.delete)
+            .chain(&changes.update_old)
+            .chain(&changes.update_new);
+        let names = endpoints
+            .map(|endpoint| normalize_name(&endpoint.dns_name))
+            .filter(|dns_name| {
+                !dns_name.is_empty()
+                    && self.domain_filter.matches(dns_name)
+                    && find_zone(&state.zones, dns_name).is_some()
+            })
+            .collect::<BTreeSet<_>>();
+
+        for dns_name in names {
+            if state
+                .zones
+                .iter()
+                .any(|zone| zone.eq_ignore_ascii_case(&dns_name))
+            {
+                continue;
+            }
+
+            let Some(records) = self.client.list_zone_records_if_exists(&dns_name).await? else {
+                continue;
+            };
+
+            state.zones.push(dns_name.clone());
+            state.records.extend(
+                records
+                    .into_iter()
+                    .filter(|record| self.domain_filter.matches(&record.endpoint.dns_name)),
+            );
+            self.discovered_zones.write().await.insert(dns_name);
+        }
+        Ok(())
     }
 
     fn validate_changes(&self, changes: &Changes) -> Result<(), ProviderError> {

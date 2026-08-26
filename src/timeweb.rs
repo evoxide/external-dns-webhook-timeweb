@@ -174,6 +174,17 @@ impl TimewebClient {
         Ok(records)
     }
 
+    pub async fn list_zone_records_if_exists(
+        &self,
+        zone: &str,
+    ) -> Result<Option<Vec<RemoteRecord>>, TimewebError> {
+        match self.list_zone_records(zone).await {
+            Ok(records) => Ok(Some(records)),
+            Err(error) if error.status() == Some(404) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
     pub async fn create_record(
         &self,
         owner_fqdn: &str,
